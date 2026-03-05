@@ -42,7 +42,7 @@
 #include "bb_archive.h"
 
 #if 0
-# define dbg(...) bb_error_msg(__VA_ARGS__)
+# define dbg(...) bb_printf(__VA_ARGS__)
 #else
 # define dbg(...) ((void)0)
 #endif
@@ -163,7 +163,7 @@ static int get_next_block(bunzip_data *bd)
 	uint32_t *dbuf;
 	unsigned origPtr, t;
 	unsigned dbufCount, runPos;
-	unsigned runCnt = 0; // runCnt; /* for compiler */
+	unsigned runCnt = 0; /* for compiler */
 
 	dbuf = bd->dbuf;
 	selectors = bd->selectors;
@@ -843,7 +843,7 @@ char* FAST_FUNC
 unpack_bz2_data(const char *packed, int packed_len, int unpacked_len)
 {
 	char *outbuf = NULL;
-	bunzip_data *bd;
+	bunzip_data *bd = NULL;
 	int i;
 	jmp_buf jmpbuf;
 
