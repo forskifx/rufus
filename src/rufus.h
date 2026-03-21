@@ -685,15 +685,19 @@ typedef struct {
 #define UNATTEND_DISABLE_BITLOCKER          0x00080
 #define UNATTEND_FORCE_S_MODE               0x00100
 #define UNATTEND_USE_MS2023_BOOTLOADERS     0x00200
-#define UNATTEND_FULL_MASK                  0x003FF
-#define UNATTEND_DEFAULT_MASK               0x002FF		// Mask of values that are persisted
+#define UNATTEND_APPLY_SKUSIPOLICY          0x00400
+#define UNATTEND_SILENT_INSTALL             0x00800
+#define UNATTEND_QOL_ENHANCEMENTS           0x01000
+#define UNATTEND_FULL_MASK                  0x01FFF
+#define UNATTEND_DEFAULT_MASK               0x016FF		// Mask of values that are persisted
 #define UNATTEND_WINDOWS_TO_GO              0x10000		// Special flag for Windows To Go
 
-#define UNATTEND_WINPE_SETUP_MASK           (UNATTEND_SECUREBOOT_TPM_MINRAM)
-#define UNATTEND_SPECIALIZE_DEPLOYMENT_MASK (UNATTEND_NO_ONLINE_ACCOUNT)
+#define UNATTEND_WINPE_SETUP_MASK           (UNATTEND_SECUREBOOT_TPM_MINRAM | UNATTEND_SILENT_INSTALL)
+#define UNATTEND_SPECIALIZE_DEPLOYMENT_MASK (UNATTEND_NO_ONLINE_ACCOUNT | UNATTEND_QOL_ENHANCEMENTS)
 #define UNATTEND_OOBE_SHELL_SETUP_MASK      (UNATTEND_NO_DATA_COLLECTION | UNATTEND_SET_USER | UNATTEND_DUPLICATE_LOCALE)
 #define UNATTEND_OOBE_INTERNATIONAL_MASK    (UNATTEND_DUPLICATE_LOCALE)
-#define UNATTEND_OOBE_MASK                  (UNATTEND_OOBE_SHELL_SETUP_MASK | UNATTEND_OOBE_INTERNATIONAL_MASK | UNATTEND_DISABLE_BITLOCKER | UNATTEND_USE_MS2023_BOOTLOADERS)
+#define UNATTEND_OOBE_MASK                  (UNATTEND_OOBE_SHELL_SETUP_MASK | UNATTEND_OOBE_INTERNATIONAL_MASK | UNATTEND_DISABLE_BITLOCKER | \
+                                             UNATTEND_USE_MS2023_BOOTLOADERS | UNATTEND_APPLY_SKUSIPOLICY | UNATTEND_QOL_ENHANCEMENTS)
 #define UNATTEND_OFFLINE_SERVICING_MASK     (UNATTEND_OFFLINE_INTERNAL_DRIVES | UNATTEND_FORCE_S_MODE)
 #define UNATTEND_DEFAULT_SELECTION_MASK     (UNATTEND_SECUREBOOT_TPM_MINRAM | UNATTEND_NO_ONLINE_ACCOUNT | UNATTEND_OFFLINE_INTERNAL_DRIVES)
 
@@ -724,7 +728,6 @@ typedef struct {
 	uint32_t Index;		// Current array size
 	uint32_t Max;		// Maximum array size
 } StrArray;
-#define STRARRAY_EMPTY { NULL, 0, 0 };
 extern void StrArrayCreate(StrArray* arr, uint32_t initial_size);
 extern int32_t StrArrayAdd(StrArray* arr, const char* str, BOOL);
 extern int32_t StrArrayAddUnique(StrArray* arr, const char* str, BOOL);
@@ -732,6 +735,18 @@ extern int32_t StrArrayFind(StrArray* arr, const char* str);
 extern void StrArrayClear(StrArray* arr);
 extern void StrArrayDestroy(StrArray* arr);
 #define IsStrArrayEmpty(arr) (arr.Index == 0)
+
+// Options for the custom selection dialog
+typedef struct {
+	int style;
+	int mask;
+	int username_index;
+	int edition_index;
+	int regional_index;
+	int privacy_index;
+	StrArray choices;
+	StrArray tooltips;
+} selection_dialog_options_t;
 
 /*
  * Globals
@@ -768,6 +783,8 @@ extern StrArray modified_files;
  * Shared prototypes
  */
 extern void GetWindowsVersion(windows_version_t* WindowsVersion);
+extern const char* GetEditionName(DWORD ProductType);
+extern int GetEditions(StrArray* version_name, StrArray* version_index);
 extern version_t* GetExecutableVersion(const char* path);
 extern const char* WindowsErrorString(void);
 extern void DumpBufferHex(void *buf, size_t size);
@@ -805,8 +822,7 @@ extern void DestroyTooltip(HWND hWnd);
 extern void DestroyAllTooltips(void);
 extern int NotificationEx(int type, const char* dont_display_setting, const notification_info* more_info, const char* title, const char* format, ...);
 #define Notification(type, title, ...) NotificationEx(type, NULL, NULL, title, __VA_ARGS__)
-extern int CustomSelectionDialog(int style, char* title, char* message, char** choices, int size, int mask, int username_index);
-#define SelectionDialog(title, message, choices, size) CustomSelectionDialog(BS_AUTORADIOBUTTON, title, message, choices, size, 1, -1)
+extern int SelectionDialog(char* title, char* message, selection_dialog_options_t* options);
 extern void ListDialog(char* title, char* message, char** items, int size);
 extern SIZE GetTextSize(HWND hCtrl, char* txt);
 extern BOOL ExtractAppIcon(const char* filename, BOOL bSilent);
@@ -815,7 +831,6 @@ extern BOOL ExtractISO(const char* src_iso, const char* dest_dir, BOOL scan);
 extern BOOL ExtractZip(const char* src_zip, const char* dest_dir);
 extern int64_t ExtractISOFile(const char* iso, const char* iso_file, const char* dest_file, DWORD attributes);
 extern uint32_t ReadISOFileToBuffer(const char* iso, const char* iso_file, uint8_t** buf);
-extern BOOL CopySKUSiPolicy(const char* drive_name);
 extern BOOL HasEfiImgBootLoaders(void);
 extern BOOL DumpFatDir(const char* path, int32_t cluster);
 extern BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int fs);
@@ -866,7 +881,6 @@ extern int GetIssuerCertificateInfo(uint8_t* cert, cert_info_t* info);
 extern uint64_t GetSignatureTimeStamp(const char* path);
 extern LONG ValidateSignature(HWND hDlg, const char* path);
 extern BOOL ValidateOpensslSignature(BYTE* pbBuffer, DWORD dwBufferLen, BYTE* pbSignature, DWORD dwSigLen);
-extern BOOL ParseSKUSiPolicy(void);
 extern BOOL IsFontAvailable(const char* font_name);
 extern BOOL WriteFileWithRetry(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
 	LPDWORD lpNumberOfBytesWritten, DWORD nNumRetries);

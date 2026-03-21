@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Rufus: The Reliable USB Formatting Utility
  * Copyright © 2011-2026 Pete Batard <pete@akeo.ie>
  *
@@ -93,10 +93,9 @@ static char uppercase_select[2][64], uppercase_start[64], uppercase_close[64], u
 
 extern HANDLE update_check_thread;
 extern HIMAGELIST hUpImageList, hDownImageList;
-extern BOOL enable_iso, enable_joliet, enable_rockridge, enable_extra_hashes, is_bootloader_revoked;
+extern BOOL enable_iso, enable_joliet, enable_rockridge, enable_extra_hashes;
 extern BOOL validate_md5sum, cpu_has_sha1_accel, cpu_has_sha256_accel, toggle_dark_mode;
 extern BYTE* fido_script;
-extern HWND hFidoDlg;
 extern uint8_t* grub2_buf;
 extern long grub2_len;
 extern char* szStatusMessage;
@@ -122,7 +121,7 @@ WORD selected_langid = MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT);
 DWORD MainThreadId;
 USHORT NativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
 HWND hDeviceList, hPartitionScheme, hTargetSystem, hFileSystem, hClusterSize, hLabel, hBootType, hNBPasses, hLog = NULL;
-HWND hImageOption, hLogDialog = NULL, hProgress = NULL;
+HWND hImageOption, hLogDialog = NULL, hProgress = NULL, hFidoDlg = NULL;
 HANDLE dialog_handle = NULL, format_thread = NULL;
 BOOL is_x86_64, use_own_c32[NB_OLD_C32] = { FALSE, FALSE }, mbr_selected_by_user = FALSE, lock_drive = TRUE;
 BOOL op_in_progress = TRUE, right_to_left_mode = FALSE, has_uefi_csm = FALSE, its_a_me_mario = FALSE;
@@ -1490,7 +1489,7 @@ out:
 // Likewise, boot check will block message processing => use a thread
 static DWORD WINAPI BootCheckThread(LPVOID param)
 {
-	int i, r, username_index = -1;
+	int i, r;
 	FILE *fd;
 	uint32_t len;
 	WPARAM ret = BOOTCHECK_CANCEL;
@@ -1503,9 +1502,9 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 	const char* syslinux = "syslinux";
 	const char* ldlinux_ext[3] = { "sys", "bss", "c32" };
 	char tmp[MAX_PATH], tmp2[MAX_PATH], c;
+	selection_dialog_options_t selection = { 0 };
 
 	syslinux_ldlinux_len[0] = 0; syslinux_ldlinux_len[1] = 0;
-	is_bootloader_revoked = FALSE;
 	safe_free(grub2_buf);
 
 	if (ComboBox_GetCurSel(hDeviceList) == CB_ERR)
@@ -1520,6 +1519,11 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 	if (boot_type == BT_IMAGE) {
 		if_assert_fails(image_path != NULL)
 			goto out;
+		if (IsSourceImageLocatedOnTargetDrive((DWORD)ComboBox_GetItemData(hDeviceList, ComboBox_GetCurSel(hDeviceList)))) {
+			// You cannot use an image that is located on the target drive
+			Notification(MB_OK | MB_ICONERROR, lmprintf(MSG_358), lmprintf(MSG_359));
+			goto out;
+		}
 		if ((size_check) && (img_report.projected_size > (uint64_t)SelectedDrive.DiskSize)) {
 			// This ISO image is too big for the selected target
 			Notification(MB_OK | MB_ICONERROR, lmprintf(MSG_088), lmprintf(MSG_089));
@@ -1550,19 +1554,25 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				// but only do so if persistence has not been selected.
 				char* iso_image = lmprintf(MSG_036);
 				char* dd_image = lmprintf(MSG_095);
+				StrArrayCreate(&selection.choices, 4);
 				// If the ISO is small enough to be written as an ESP and we are using GPT add the ISO → ESP option
 				if ((img_report.projected_size < MAX_ISO_TO_ESP_SIZE) && HAS_REGULAR_EFI(img_report) &&
 					(partition_type == PARTITION_STYLE_GPT) && IS_FAT(fs_type)) {
-					char* choices[3] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP"), lmprintf(MSG_277, dd_image) };
-					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), choices, 3);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_276, iso_image), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_277, "ISO → ESP"), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_277, dd_image), TRUE);
+					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), &selection);
+					StrArrayDestroy(&selection.choices);
 					if (i < 0)	// Cancel
 						goto out;
 					write_as_esp = (i & 2);
 					write_as_image = (i & 4);
 					esp_already_asked = TRUE;
 				} else {
-					char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, dd_image) };
-					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), choices, 2);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_276, iso_image), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_277, dd_image), TRUE);
+					i = SelectionDialog(lmprintf(MSG_274, "ISOHybrid"), lmprintf(MSG_275, iso_image, dd_image, iso_image, dd_image), &selection);
+					StrArrayDestroy(&selection.choices);
 					if (i < 0)	// Cancel
 						goto out;
 					write_as_image = (i & 2);
@@ -1600,30 +1610,43 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				break;
 			}
 			if ((WindowsVersion.Version >= WINDOWS_8) && IS_WINDOWS_1X(img_report)) {
-				StrArray options;
 				int arch = _log2(img_report.has_efi >> 1);
 				uint16_t map[16] = { 0 }, b = 1;
-				StrArrayCreate(&options, 8);
-				StrArrayAdd(&options, lmprintf(MSG_332), TRUE);
+				StrArrayCreate(&selection.choices, 8);
+				StrArrayCreate(&selection.tooltips, 8);
+				StrArrayAdd(&selection.choices, lmprintf(MSG_332), TRUE);
+				StrArrayAdd(&selection.tooltips, lmprintf(MSG_363), TRUE);
 				MAP_BIT(UNATTEND_OFFLINE_INTERNAL_DRIVES);
 				if (img_report.win_version.build >= 22500) {
-					StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_330), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_361), TRUE);
 					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
 				}
-				StrArrayAdd(&options, lmprintf(MSG_333), TRUE);
-				username_index = _log2(b);
+				StrArrayAdd(&selection.choices, lmprintf(MSG_333), TRUE);
+				StrArrayAdd(&selection.tooltips, lmprintf(MSG_364), TRUE);
+				selection.username_index = _log2(b);
 				MAP_BIT(UNATTEND_SET_USER);
-				StrArrayAdd(&options, lmprintf(MSG_334), TRUE);
+				StrArrayAdd(&selection.choices, lmprintf(MSG_334), TRUE);
+				StrArrayAdd(&selection.tooltips, lmprintf(MSG_365), TRUE);
 				MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
-				StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
+				StrArrayAdd(&selection.choices, lmprintf(MSG_331), TRUE);
+				StrArrayAdd(&selection.tooltips, lmprintf(MSG_362), TRUE);
 				MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
+				if (IS_WINDOWS_11(img_report)) {
+					StrArrayAdd(&selection.choices, lmprintf(MSG_324), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_370), TRUE);
+					MAP_BIT(UNATTEND_QOL_ENHANCEMENTS);
+				}
 				if (expert_mode) {
-					StrArrayAdd(&options, lmprintf(MSG_346), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_346), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_367), TRUE);
 					MAP_BIT(UNATTEND_FORCE_S_MODE);
 				}
-				i = CustomSelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_327), lmprintf(MSG_328),
-					options.String, options.Index, remap16(unattend_xml_mask, map, FALSE), username_index);
-				StrArrayDestroy(&options);
+				selection.mask = remap16(unattend_xml_mask, map, FALSE);
+				selection.style = BS_AUTOCHECKBOX;
+				i = SelectionDialog(lmprintf(MSG_327), lmprintf(MSG_328), &selection);
+				StrArrayDestroy(&selection.choices);
+				StrArrayDestroy(&selection.tooltips);
 				if (i < 0)
 					goto out;
 				// Remap i to the correct bit positions before calling CreateUnattendXml()
@@ -1664,38 +1687,62 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				uprintf("NOTICE: A '/sources/$OEM$/$$/Panther/unattend.xml' was detected on the ISO.");
 				uprintf("As a result, the 'Windows User Experience dialog' will not be displayed.");
 			} else {
-				StrArray options;
 				int arch = _log2(img_report.has_efi >> 1);
 				uint16_t map[16] = { 0 }, b = 1;
-				StrArrayCreate(&options, 10);
+				StrArrayCreate(&selection.choices, 16);
+				StrArrayCreate(&selection.tooltips, 16);
 				if (IS_WINDOWS_11(img_report)) {
-					StrArrayAdd(&options, lmprintf(MSG_329), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_329), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_360), TRUE);
 					MAP_BIT(UNATTEND_SECUREBOOT_TPM_MINRAM);
 				}
 				if (img_report.win_version.build >= 22500) {
-					StrArrayAdd(&options, lmprintf(MSG_330), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_330), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_361), TRUE);
 					MAP_BIT(UNATTEND_NO_ONLINE_ACCOUNT);
 				}
-				StrArrayAdd(&options, lmprintf(MSG_333), TRUE);
-				username_index = _log2(b);
+				StrArrayAdd(&selection.choices, lmprintf(MSG_333), TRUE);
+				StrArrayAdd(&selection.tooltips, lmprintf(MSG_364), TRUE);
+				selection.username_index = _log2(b);
 				MAP_BIT(UNATTEND_SET_USER);
-				StrArrayAdd(&options, lmprintf(MSG_334), TRUE);
+				StrArrayAdd(&selection.choices, lmprintf(MSG_334), TRUE);
+				StrArrayAdd(&selection.tooltips, lmprintf(MSG_365), TRUE);
+				selection.regional_index = _log2(b);
 				MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
-				StrArrayAdd(&options, lmprintf(MSG_331), TRUE);
+				StrArrayAdd(&selection.choices, lmprintf(MSG_331), TRUE);
+				StrArrayAdd(&selection.tooltips, lmprintf(MSG_362), TRUE);
+				selection.privacy_index = _log2(b);
 				MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
-				StrArrayAdd(&options, lmprintf(MSG_335), TRUE);
-				MAP_BIT(UNATTEND_DISABLE_BITLOCKER);
-				if (img_report.win_version.build >= 26200) {
-					StrArrayAdd(&options, lmprintf(MSG_350), TRUE);
-					MAP_BIT(UNATTEND_USE_MS2023_BOOTLOADERS);
+				if (IS_WINDOWS_11(img_report)) {
+					StrArrayAdd(&selection.choices, lmprintf(MSG_335), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_366), TRUE);
+					MAP_BIT(UNATTEND_DISABLE_BITLOCKER);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_324), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_370), TRUE);
+					MAP_BIT(UNATTEND_QOL_ENHANCEMENTS);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_355), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_371), TRUE);
+					selection.edition_index = _log2(b);
+					MAP_BIT(UNATTEND_SILENT_INSTALL);
+					if (img_report.win_version.build >= 26200) {
+						StrArrayAdd(&selection.choices, lmprintf(MSG_350), TRUE);
+						StrArrayAdd(&selection.tooltips, lmprintf(MSG_368), TRUE);
+						MAP_BIT(UNATTEND_USE_MS2023_BOOTLOADERS);
+						StrArrayAdd(&selection.choices, lmprintf(MSG_323), TRUE);
+						StrArrayAdd(&selection.tooltips, lmprintf(MSG_369), TRUE);
+						MAP_BIT(UNATTEND_APPLY_SKUSIPOLICY);
+					}
 				}
 				if (expert_mode) {
-					StrArrayAdd(&options, lmprintf(MSG_346), TRUE);
+					StrArrayAdd(&selection.choices, lmprintf(MSG_346), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_367), TRUE);
 					MAP_BIT(UNATTEND_FORCE_S_MODE);
 				}
-				i = CustomSelectionDialog(BS_AUTOCHECKBOX, lmprintf(MSG_327), lmprintf(MSG_328),
-					options.String, options.Index, remap16(unattend_xml_mask, map, FALSE), username_index);
-				StrArrayDestroy(&options);
+				selection.mask = remap16(unattend_xml_mask, map, FALSE);
+				selection.style = BS_AUTOCHECKBOX;
+				i = SelectionDialog(lmprintf(MSG_327), lmprintf(MSG_328), &selection);
+				StrArrayDestroy(&selection.choices);
+				StrArrayDestroy(&selection.tooltips);
 				if (i < 0)
 					goto out;
 				i = remap16(i, map, TRUE);
@@ -1712,8 +1759,11 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			// The ISO is small enough to be written as an ESP and we are using GPT
 			// so ask the users if they want to write it as an ESP.
 			char* iso_image = lmprintf(MSG_036);
-			char* choices[2] = { lmprintf(MSG_276, iso_image), lmprintf(MSG_277, "ISO → ESP") };
-			i = SelectionDialog(lmprintf(MSG_274, "ESP"), lmprintf(MSG_310), choices, 2);
+			StrArrayCreate(&selection.choices, 2);
+			StrArrayAdd(&selection.choices, lmprintf(MSG_276, iso_image), TRUE);
+			StrArrayAdd(&selection.choices, lmprintf(MSG_277, "ISO → ESP"), TRUE);
+			i = SelectionDialog(lmprintf(MSG_274, "ESP"), lmprintf(MSG_310), &selection);
+			StrArrayDestroy(&selection.choices);
 			if (i < 0)	// Cancel
 				goto out;
 			write_as_esp = (i & 2);
@@ -2965,6 +3015,8 @@ static INT_PTR CALLBACK MainCallback(HWND hDlg, UINT message, WPARAM wParam, LPA
 					img_provided = TRUE;
 					// Simulate image selection click
 					SendMessage(hDlg, WM_COMMAND, IDC_SELECT, 0);
+				} else {
+					EnableControls(TRUE, FALSE);
 				}
 		}
 		break;
