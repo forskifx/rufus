@@ -1,7 +1,7 @@
 /*
  * Rufus: The Reliable USB Formatting Utility
  * ISO file extraction
- * Copyright © 2011-2024 Pete Batard <pete@akeo.ie>
+ * Copyright © 2011-2026 Pete Batard <pete@akeo.ie>
  * Based on libcdio's iso & udf samples:
  * Copyright © 2003-2014 Rocky Bernstein <rocky@gnu.org>
  *
@@ -65,6 +65,9 @@ _Static_assert(256 * KB >= ISO_BLOCKSIZE, "Can't set PROGRESS_THRESHOLD");
 // Set the iso_open_ext() extension mask according to our global options
 #define ISO_EXTENSION_MASK        (ISO_EXTENSION_ALL & (enable_joliet ? ISO_EXTENSION_ALL : ~ISO_EXTENSION_JOLIET) & \
                                   (enable_rockridge ? ISO_EXTENSION_ALL : ~ISO_EXTENSION_ROCK_RIDGE))
+
+// Is an MBR partition type for a FAT12/FAT16/FAT32 partition?
+#define IS_FAT_TYPE(x)            ((x) == 0x01 || (x) == 0x04 || (x) == 0x06 || (x) == 0x0b || (x) == 0x0c || (x) == 0x0e)
 
 // Needed for UDF ISO access
 CdIo_t* cdio_open (const char* psz_source, driver_id_t driver_id) {return NULL;}
@@ -385,6 +388,10 @@ static BOOL check_iso_props(const char* psz_dirname, int64_t file_length, const 
 		if (!HAS_EFI_IMG(img_report) && (safe_strlen(psz_basename) >= 7) &&
 			(safe_strnicmp(psz_basename, "efi", 3) == 0) &&
 			(safe_stricmp(&psz_basename[strlen(psz_basename) - 4], ".img") == 0))
+			static_strcpy(img_report.efi_img_path, psz_fullpath);
+
+		// Special case for Lenovo UEFI firmware update ISOs, that use emulated El-Torito HDD images
+		if (!HAS_EFI_IMG(img_report) && stricmp(psz_fullpath, "/[BOOT]/0-Boot-HardDisk.img") == 0)
 			static_strcpy(img_report.efi_img_path, psz_fullpath);
 
 		// Check for the EFI boot entries. Note that because of Bazzite maintainers' disregard for end users
@@ -1234,7 +1241,7 @@ BOOL ExtractISO(const char* src_iso, const char* dest_dir, BOOL scan)
 	scan_only = scan;
 	if (!scan_only)
 		spacing = "";
-	cdio_log_set_handler(log_handler);
+	cdio_log_set_handler((scan_only && !usb_debug) ? NULL : log_handler);
 	psz_extract_dir = dest_dir;
 	// Change progress style to marquee for scanning
 	if (scan_only) {
@@ -1420,7 +1427,7 @@ out:
 					img_report.sl_version_str);
 			}
 		}
-		if (!IS_EFI_BOOTABLE(img_report) && HAS_EFI_IMG(img_report) && HasEfiImgBootLoaders()) {
+		if (!IS_EFI_BOOTABLE(img_report) && HAS_EFI_IMG(img_report) && HasEfiImgBootLoaders(p_iso)) {
 			img_report.has_efi = 0x8000;
 		}
 		if (HAS_WINPE(img_report)) {
@@ -1510,7 +1517,7 @@ out:
 				static_sprintf(path, "%s\\EFI\\boot\\bootx64.efi", dest_dir);
 				DeleteFileU(path);
 			}
-			DumpFatDir(dest_dir, 0);
+			DumpFatDir(p_iso, dest_dir, 0);
 		}
 		if (HAS_SYSLINUX(img_report)) {
 			static_sprintf(path, "%s\\syslinux.cfg", dest_dir);
@@ -1840,10 +1847,10 @@ int iso9660_readfat(intptr_t pp, void *buf, size_t secsize, libfat_sector_t sec)
 /*
  * Returns TRUE if an EFI bootloader exists in the img.
  */
-BOOL HasEfiImgBootLoaders(void)
+BOOL HasEfiImgBootLoaders(void* iso)
 {
 	BOOL ret = FALSE;
-	iso9660_t* p_iso = NULL;
+	iso9660_t* p_iso = (iso9660_t*)iso;
 	iso9660_stat_t* p_statbuf = NULL;
 	iso9660_readfat_private* p_private = NULL;
 	int32_t dc, c;
@@ -1852,14 +1859,9 @@ BOOL HasEfiImgBootLoaders(void)
 	char bootloader_name[16];
 	int i;
 
-	if ((image_path == NULL) || !HAS_EFI_IMG(img_report))
+	if ((p_iso == NULL) || !HAS_EFI_IMG(img_report))
 		return FALSE;
 
-	p_iso = iso9660_open_ext(image_path, ISO_EXTENSION_MASK);
-	if (p_iso == NULL) {
-		uprintf("Could not open image '%s' as an ISO-9660 file system", image_path);
-		goto out;
-	}
 	p_statbuf = iso9660_ifs_stat_translate(p_iso, img_report.efi_img_path);
 	if (p_statbuf == NULL) {
 		uprintf("Could not get ISO-9660 file information for file %s", img_report.efi_img_path);
@@ -1875,6 +1877,20 @@ BOOL HasEfiImgBootLoaders(void)
 	if (iso9660_iso_seek_read(p_private->p_iso, p_private->buf, p_private->lsn, ISO_NB_BLOCKS) != ISO_NB_BLOCKS * ISO_BLOCKSIZE) {
 		uprintf("Error reading ISO-9660 file %s at LSN %lu", img_report.efi_img_path, (long unsigned int)p_private->lsn);
 		goto out;
+	}
+	// Try to skip to first FAT partition, if working with an MBR partitioned image
+	if (p_private->buf[0x1fe] == 0x55 && p_private->buf[0x1ff] == 0xaa &&
+		p_private->buf[0x1be] == 0x80 && IS_FAT_TYPE(p_private->buf[0x1c2])) {
+		uint32_t lba = *((uint32_t*)&p_private->buf[0x1c6]);
+		if (lba % 4 != 0) {
+			uprintf("Error: First MBR partition doesn't map to ISO-9660 sector");
+			goto out;
+		}
+		p_private->lsn += lba / 4;
+		if (iso9660_iso_seek_read(p_private->p_iso, p_private->buf, p_private->lsn, ISO_NB_BLOCKS) != ISO_NB_BLOCKS * ISO_BLOCKSIZE) {
+			uprintf("Error reading ISO-9660 file %s at LSN %lu", img_report.efi_img_path, (long unsigned int)p_private->lsn);
+			goto out;
+		}
 	}
 	lf_fs = libfat_open(iso9660_readfat, (intptr_t)p_private);
 	if (lf_fs == NULL) {
@@ -1911,12 +1927,11 @@ out:
 	if (lf_fs != NULL)
 		libfat_close(lf_fs);
 	iso9660_stat_free(p_statbuf);
-	iso9660_close(p_iso);
 	safe_free(p_private);
 	return ret;
 }
 
-BOOL DumpFatDir(const char* path, int32_t cluster)
+BOOL DumpFatDir(void* iso, const char* path, int32_t cluster)
 {
 	// We don't have concurrent calls to this function, so a static lf_fs is fine
 	static struct libfat_filesystem *lf_fs = NULL;
@@ -1928,7 +1943,7 @@ BOOL DumpFatDir(const char* path, int32_t cluster)
 	libfat_diritem_t diritem = { 0 };
 	libfat_dirpos_t dirpos = { cluster, -1, 0 };
 	libfat_sector_t s;
-	iso9660_t* p_iso = NULL;
+	iso9660_t* p_iso = (iso9660_t*)iso;
 	iso9660_stat_t* p_statbuf = NULL;
 	iso9660_readfat_private* p_private = NULL;
 
@@ -1937,13 +1952,8 @@ BOOL DumpFatDir(const char* path, int32_t cluster)
 
 	if (cluster == 0) {
 		// Root dir => Perform init stuff
-		if (image_path == NULL)
+		if (iso == NULL || image_path == NULL)
 			return FALSE;
-		p_iso = iso9660_open_ext(image_path, ISO_EXTENSION_MASK);
-		if (p_iso == NULL) {
-			uprintf("Could not open image '%s' as an ISO-9660 file system", image_path);
-			goto out;
-		}
 		p_statbuf = iso9660_ifs_stat_translate(p_iso, img_report.efi_img_path);
 		if (p_statbuf == NULL) {
 			uprintf("Could not get ISO-9660 file information for file %s", img_report.efi_img_path);
@@ -1959,6 +1969,15 @@ BOOL DumpFatDir(const char* path, int32_t cluster)
 		if (iso9660_iso_seek_read(p_private->p_iso, p_private->buf, p_private->lsn, ISO_NB_BLOCKS) != ISO_NB_BLOCKS * ISO_BLOCKSIZE) {
 			uprintf("Error reading ISO-9660 file %s at LSN %lu", img_report.efi_img_path, (long unsigned int)p_private->lsn);
 			goto out;
+		}
+		// Try to skip to first FAT partition, if working with an MBR partitioned image
+		if (p_private->buf[0x1fe] == 0x55 && p_private->buf[0x1ff] == 0xaa &&
+			p_private->buf[0x1be] == 0x80 && IS_FAT_TYPE(p_private->buf[0x1c2])) {
+			p_private->lsn += *((uint32_t*)&p_private->buf[0x1c6]) / 4;
+			if (iso9660_iso_seek_read(p_private->p_iso, p_private->buf, p_private->lsn, ISO_NB_BLOCKS) != ISO_NB_BLOCKS * ISO_BLOCKSIZE) {
+				uprintf("Error reading ISO-9660 file %s at LSN %lu", img_report.efi_img_path, (long unsigned int)p_private->lsn);
+				goto out;
+			}
 		}
 		lf_fs = libfat_open(iso9660_readfat, (intptr_t)p_private);
 		if (lf_fs == NULL) {
@@ -1985,7 +2004,7 @@ BOOL DumpFatDir(const char* path, int32_t cluster)
 					uprintf("Could not create directory '%s': %s", target, WindowsErrorString());
 					continue;
 				}
-				if (!DumpFatDir(target, dirpos.cluster))
+				if (!DumpFatDir(p_iso, target, dirpos.cluster))
 					goto out;
 			} else if (!PathFileExistsU(target)) {
 				// Need to figure out if it's a .conf file (Damn you Solus!!)
@@ -2037,8 +2056,7 @@ out:
 			libfat_close(lf_fs);
 			lf_fs = NULL;
 		}
-		iso9660_stat_free(p_statbuf);;
-		iso9660_close(p_iso);
+		iso9660_stat_free(p_statbuf);
 		safe_free(p_private);
 	}
 	safe_closehandle(handle);
@@ -2047,7 +2065,6 @@ out:
 	return ret;
 }
 
-// TODO: If we can't get save to ISO from virtdisk, we might as well drop this
 static DWORD WINAPI OpticalDiscSaveImageThread(void* param)
 {
 	BOOL s;

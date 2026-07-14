@@ -150,6 +150,11 @@
 #endif
 #define SYMBOL_SERVER_USER_AGENT    "Microsoft-Symbol-Server/10.0.22621.755"
 #define DEFAULT_ESP_MOUNT_POINT     "S:\\"
+// Per https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-useraccounts-localaccounts-localaccount-name
+// and https://learn.microsoft.com/en-us/previous-versions/cc722458(v=technet.10)#user-name-policies
+// Add '.' to the list because some folks also reported an issue with local accounts that have dots.
+// Also add '&', even as it could be escaped, as it's just not worth the trouble...
+#define USERNAME_INVALID_CHARS      "/\\[]:;|=.,+*?<>%@&\""
 #define IS_POWER_OF_2(x)            ((x != 0) && (((x) & ((x) - 1)) == 0))
 #define IGNORE_RETVAL(expr)         do { (void)(expr); } while(0)
 #ifndef ARRAYSIZE
@@ -513,7 +518,7 @@ typedef struct {
  *   EXT_DECL(my_extensions, "default.std", __VA_GROUP__("*.std", "*.other"), __VA_GROUP__("Standard type", "Other Type"));
  * to define an 'ext_t my_extensions' variable initialized with the relevant attributes.
  */
-typedef struct ext_t {
+typedef struct {
 	size_t count;
 	const char* filename;
 	const char** extension;
@@ -658,11 +663,14 @@ enum WindowsVersion {
 };
 
 typedef struct {
-	DWORD Major;
-	DWORD Minor;
-	DWORD Micro;
-	DWORD Nano;
+	WORD Major;
+	WORD Minor;
+	WORD Micro;
+	WORD Nano;
 } version_t;
+static __inline uint64_t version_to_uint64(version_t* ver) {
+	return (uint64_t)ver->Major << 48 | (uint64_t)ver->Minor << 32 | (uint64_t)ver->Micro << 16 | ver->Nano;
+}
 
 typedef struct {
 	DWORD Version;
@@ -694,7 +702,7 @@ typedef struct {
 
 #define UNATTEND_WINPE_SETUP_MASK           (UNATTEND_SECUREBOOT_TPM_MINRAM | UNATTEND_SILENT_INSTALL)
 #define UNATTEND_SPECIALIZE_DEPLOYMENT_MASK (UNATTEND_NO_ONLINE_ACCOUNT | UNATTEND_QOL_ENHANCEMENTS)
-#define UNATTEND_OOBE_SHELL_SETUP_MASK      (UNATTEND_NO_DATA_COLLECTION | UNATTEND_SET_USER | UNATTEND_DUPLICATE_LOCALE)
+#define UNATTEND_OOBE_SHELL_SETUP_MASK      (UNATTEND_NO_DATA_COLLECTION | UNATTEND_SET_USER | UNATTEND_DUPLICATE_LOCALE | UNATTEND_SILENT_INSTALL)
 #define UNATTEND_OOBE_INTERNATIONAL_MASK    (UNATTEND_DUPLICATE_LOCALE)
 #define UNATTEND_OOBE_MASK                  (UNATTEND_OOBE_SHELL_SETUP_MASK | UNATTEND_OOBE_INTERNATIONAL_MASK | UNATTEND_DISABLE_BITLOCKER | \
                                              UNATTEND_USE_MS2023_BOOTLOADERS | UNATTEND_APPLY_SKUSIPOLICY | UNATTEND_QOL_ENHANCEMENTS)
@@ -737,9 +745,12 @@ extern void StrArrayDestroy(StrArray* arr);
 #define IsStrArrayEmpty(arr) (arr.Index == 0)
 
 // Options for the custom selection dialog
+#define SELECTION_NEEDS_ALL_TO_PROCEED 1
+#define SELECTION_USE_WARNING_ICON     2
 typedef struct {
 	int style;
 	int mask;
+	int flags;
 	int username_index;
 	int edition_index;
 	int regional_index;
@@ -817,8 +828,10 @@ extern BOOL CreateTaskbarList(void);
 extern BOOL SetTaskbarProgressState(TASKBAR_PROGRESS_FLAGS tbpFlags);
 extern BOOL SetTaskbarProgressValue(ULONGLONG ullCompleted, ULONGLONG ullTotal);
 extern INT_PTR CreateAboutBox(void);
-extern BOOL CreateTooltip(HWND hControl, const char* message, int duration);
-extern void DestroyTooltip(HWND hWnd);
+extern BOOL CreateTooltipEx(HWND hDlg, HWND hControl, const char* message, int duration);
+#define CreateTooltip(hControl, message, duration) CreateTooltipEx(hMainDialog, hControl, message, duration)
+extern void PopTooltip(HWND hControl);
+extern void DestroyTooltip(HWND hControl);
 extern void DestroyAllTooltips(void);
 extern int NotificationEx(int type, const char* dont_display_setting, const notification_info* more_info, const char* title, const char* format, ...);
 #define Notification(type, title, ...) NotificationEx(type, NULL, NULL, title, __VA_ARGS__)
@@ -831,8 +844,8 @@ extern BOOL ExtractISO(const char* src_iso, const char* dest_dir, BOOL scan);
 extern BOOL ExtractZip(const char* src_zip, const char* dest_dir);
 extern int64_t ExtractISOFile(const char* iso, const char* iso_file, const char* dest_file, DWORD attributes);
 extern uint32_t ReadISOFileToBuffer(const char* iso, const char* iso_file, uint8_t** buf);
-extern BOOL HasEfiImgBootLoaders(void);
-extern BOOL DumpFatDir(const char* path, int32_t cluster);
+extern BOOL HasEfiImgBootLoaders(void* iso);
+extern BOOL DumpFatDir(void* iso, const char* path, int32_t cluster);
 extern BOOL InstallSyslinux(DWORD drive_index, char drive_letter, int fs);
 extern uint16_t GetSyslinuxVersion(char* buf, size_t buf_size, char** ext);
 extern BOOL SetAutorun(const char* path);
@@ -871,6 +884,7 @@ extern char* insert_section_data(const char* filename, const char* section, cons
 extern char* replace_in_token_data(const char* filename, const char* token, const char* src, const char* rep, BOOL dos2unix);
 extern char* replace_char(const char* src, const char c, const char* rep);
 extern void filter_chars(char* str, const char* rem, const char rep);
+extern void trim(char* str);
 extern char* remove_substr(const char* src, const char* sub);
 extern void parse_update(char* buf, size_t len);
 extern void* get_data_from_asn1(const uint8_t* buf, size_t buf_len, const char* oid_str, uint8_t asn1_type, size_t* data_len);

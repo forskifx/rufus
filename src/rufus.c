@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Rufus: The Reliable USB Formatting Utility
  * Copyright © 2011-2026 Pete Batard <pete@akeo.ie>
  *
@@ -108,7 +108,7 @@ extern const char *bootmgr_efi_name, *efi_dirname, *efi_bootname[ARCH_MAX];
  * Globals
  */
 OPENED_LIBRARIES_VARS;
-RUFUS_UPDATE update = { { 0,0,0 },{ 0,0 }, NULL, NULL };
+RUFUS_UPDATE update = { 0 };
 HINSTANCE hMainInstance;
 HWND hMainDialog, hMultiToolbar, hSaveToolbar, hHashToolbar, hAdvancedDeviceToolbar, hAdvancedFormatToolbar, hUpdatesDlg = NULL;
 HFONT hInfoFont = NULL, hSectionHeaderFont = NULL;
@@ -123,7 +123,7 @@ USHORT NativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
 HWND hDeviceList, hPartitionScheme, hTargetSystem, hFileSystem, hClusterSize, hLabel, hBootType, hNBPasses, hLog = NULL;
 HWND hImageOption, hLogDialog = NULL, hProgress = NULL, hFidoDlg = NULL;
 HANDLE dialog_handle = NULL, format_thread = NULL;
-BOOL is_x86_64, use_own_c32[NB_OLD_C32] = { FALSE, FALSE }, mbr_selected_by_user = FALSE, lock_drive = TRUE;
+BOOL is_x86_64, use_own_c32[NB_OLD_C32] = { 0 }, mbr_selected_by_user = FALSE, lock_drive = TRUE;
 BOOL op_in_progress = TRUE, right_to_left_mode = FALSE, has_uefi_csm = FALSE, its_a_me_mario = FALSE;
 BOOL enable_HDDs = FALSE, enable_VHDs = TRUE, enable_ntfs_compression = FALSE, no_confirmation_on_cancel = FALSE;
 BOOL advanced_mode_device, advanced_mode_format, allow_dual_uefi_bios, detect_fakes, enable_vmdk, force_large_fat32;
@@ -131,7 +131,7 @@ BOOL usb_debug, use_fake_units, preserve_timestamps = FALSE, fast_zeroing = FALS
 BOOL zero_drive = FALSE, list_non_usb_removable_drives = FALSE, enable_file_indexing, large_drive = FALSE;
 BOOL write_as_image = FALSE, write_as_esp = FALSE, use_vds = FALSE, ignore_boot_marker = FALSE, save_image = FALSE;
 BOOL appstore_version = FALSE, is_vds_available = TRUE, persistent_log = FALSE, has_ffu_support = FALSE;
-BOOL expert_mode = FALSE, use_rufus_mbr = TRUE;
+BOOL expert_mode = FALSE, use_rufus_mbr = TRUE, bcdboot_supports_ex = FALSE, append_silent = FALSE;
 float fScale = 1.0f;
 int dialog_showing = 0, selection_default = BT_IMAGE, persistence_unit_selection = -1, imop_win_sel = 0;
 int default_fs, fs_type, boot_type, partition_type, target_type;
@@ -1391,6 +1391,8 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 				(img_report.compression_type != BLED_COMPRESSION_NONE && img_report.compression_type < BLED_COMPRESSION_MAX) ?
 				"compressed " : "", img_report.is_vhd ? "VHD" : "disk");
 		selection_default = BT_IMAGE;
+		if (img_report.projected_size > 0)
+			uprintf("  Size: %s (Projected)", SizeToHumanReadable(img_report.projected_size, FALSE, FALSE));
 	}
 
 	if (img_report.is_iso) {
@@ -1454,7 +1456,6 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 		}
 		UpdateImage(dont_display_image_name);
 		ToggleImageOptions();
-		EnableControls(TRUE, FALSE);
 		// Set Target and FS accordingly
 		if (img_report.is_iso || img_report.is_windows_img) {
 			IGNORE_RETVAL(ComboBox_SetCurSel(hBootType, image_index));
@@ -1467,6 +1468,7 @@ DWORD WINAPI ImageScanThread(LPVOID param)
 			SendMessage(hMainDialog, WM_COMMAND, (CBN_SELCHANGE_INTERNAL << 16) | IDC_FILE_SYSTEM,
 				ComboBox_GetCurSel(hFileSystem));
 		}
+		EnableControls(TRUE, FALSE);
 		// Lose the focus on the select ISO (but place it on Close)
 		SendMessage(hMainDialog, WM_NEXTDLGCTL, (WPARAM)FALSE, 0);
 		// Lose the focus from Close and set it back to Start
@@ -1506,6 +1508,7 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 
 	syslinux_ldlinux_len[0] = 0; syslinux_ldlinux_len[1] = 0;
 	safe_free(grub2_buf);
+	append_silent = FALSE;
 
 	if (ComboBox_GetCurSel(hDeviceList) == CB_ERR)
 		goto out;
@@ -1524,7 +1527,8 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 			Notification(MB_OK | MB_ICONERROR, lmprintf(MSG_358), lmprintf(MSG_359));
 			goto out;
 		}
-		if ((size_check) && (img_report.projected_size > (uint64_t)SelectedDrive.DiskSize)) {
+		/* Add 4 KB extra margin for VHD footers and so on */
+		if ((size_check) && (img_report.projected_size > ((uint64_t)SelectedDrive.DiskSize + 4 * KB))) {
 			// This ISO image is too big for the selected target
 			Notification(MB_OK | MB_ICONERROR, lmprintf(MSG_088), lmprintf(MSG_089));
 			goto out;
@@ -1624,7 +1628,7 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				}
 				StrArrayAdd(&selection.choices, lmprintf(MSG_333), TRUE);
 				StrArrayAdd(&selection.tooltips, lmprintf(MSG_364), TRUE);
-				selection.username_index = _log2(b);
+				selection.username_index = _log2(b) + 1;
 				MAP_BIT(UNATTEND_SET_USER);
 				StrArrayAdd(&selection.choices, lmprintf(MSG_334), TRUE);
 				StrArrayAdd(&selection.tooltips, lmprintf(MSG_365), TRUE);
@@ -1636,6 +1640,11 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 					StrArrayAdd(&selection.choices, lmprintf(MSG_324), TRUE);
 					StrArrayAdd(&selection.tooltips, lmprintf(MSG_370), TRUE);
 					MAP_BIT(UNATTEND_QOL_ENHANCEMENTS);
+					if (img_report.win_version.build >= 26200 && bcdboot_supports_ex) {
+						StrArrayAdd(&selection.choices, lmprintf(MSG_350), TRUE);
+						StrArrayAdd(&selection.tooltips, lmprintf(MSG_368), TRUE);
+						MAP_BIT(UNATTEND_USE_MS2023_BOOTLOADERS);
+					}
 				}
 				if (expert_mode) {
 					StrArrayAdd(&selection.choices, lmprintf(MSG_346), TRUE);
@@ -1703,27 +1712,27 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				}
 				StrArrayAdd(&selection.choices, lmprintf(MSG_333), TRUE);
 				StrArrayAdd(&selection.tooltips, lmprintf(MSG_364), TRUE);
-				selection.username_index = _log2(b);
+				selection.username_index = _log2(b) + 1;
 				MAP_BIT(UNATTEND_SET_USER);
 				StrArrayAdd(&selection.choices, lmprintf(MSG_334), TRUE);
 				StrArrayAdd(&selection.tooltips, lmprintf(MSG_365), TRUE);
-				selection.regional_index = _log2(b);
+				selection.regional_index = _log2(b) + 1;
 				MAP_BIT(UNATTEND_DUPLICATE_LOCALE);
 				StrArrayAdd(&selection.choices, lmprintf(MSG_331), TRUE);
 				StrArrayAdd(&selection.tooltips, lmprintf(MSG_362), TRUE);
-				selection.privacy_index = _log2(b);
+				selection.privacy_index = _log2(b) + 1;
 				MAP_BIT(UNATTEND_NO_DATA_COLLECTION);
 				if (IS_WINDOWS_11(img_report)) {
+					StrArrayAdd(&selection.choices, lmprintf(MSG_355), TRUE);
+					StrArrayAdd(&selection.tooltips, lmprintf(MSG_371), TRUE);
+					selection.edition_index = _log2(b) + 1;
+					MAP_BIT(UNATTEND_SILENT_INSTALL);
 					StrArrayAdd(&selection.choices, lmprintf(MSG_335), TRUE);
 					StrArrayAdd(&selection.tooltips, lmprintf(MSG_366), TRUE);
 					MAP_BIT(UNATTEND_DISABLE_BITLOCKER);
 					StrArrayAdd(&selection.choices, lmprintf(MSG_324), TRUE);
 					StrArrayAdd(&selection.tooltips, lmprintf(MSG_370), TRUE);
 					MAP_BIT(UNATTEND_QOL_ENHANCEMENTS);
-					StrArrayAdd(&selection.choices, lmprintf(MSG_355), TRUE);
-					StrArrayAdd(&selection.tooltips, lmprintf(MSG_371), TRUE);
-					selection.edition_index = _log2(b);
-					MAP_BIT(UNATTEND_SILENT_INSTALL);
 					if (img_report.win_version.build >= 26200) {
 						StrArrayAdd(&selection.choices, lmprintf(MSG_350), TRUE);
 						StrArrayAdd(&selection.tooltips, lmprintf(MSG_368), TRUE);
@@ -1746,6 +1755,7 @@ static DWORD WINAPI BootCheckThread(LPVOID param)
 				if (i < 0)
 					goto out;
 				i = remap16(i, map, TRUE);
+				append_silent = (i & UNATTEND_SILENT_INSTALL);
 				unattend_xml_path = CreateUnattendXml(arch, i);
 				// Remember the user preferences for the current session.
 				unattend_xml_mask &= ~(remap16(UNATTEND_FULL_MASK, map, TRUE));
@@ -3835,6 +3845,11 @@ skip_args_processing:
 	// FFU support started with Windows 10 1709 (through FfuProvider.dll)
 	static_sprintf(tmp_path, "%s\\dism\\FfuProvider.dll", sysnative_dir);
 	has_ffu_support = (_accessU(tmp_path, 0) == 0);
+
+	// Detect if bcdboot supports the /offline /bootex options (v10.0.26100.0 or later)
+	static_sprintf(tmp_path, "%s\\bcdboot.exe", sysnative_dir);
+	bcdboot_supports_ex = (version_to_uint64(GetExecutableVersion(tmp_path)) >= 0x000A000065F40000);
+	uprintf("Detected bcdboot %s EX options", bcdboot_supports_ex ? "with" : "without");
 
 relaunch:
 	ubprintf("Localization set to '%s'", selected_locale->txt[0]);

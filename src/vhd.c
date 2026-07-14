@@ -99,6 +99,9 @@ static int8_t IsCompressedBootableImage(const char* path)
 			ErrorStatus = 0;
 			if (img_report.compression_type < BLED_COMPRESSION_MAX) {
 				bled_init(0, uprintf, NULL, NULL, NULL, NULL, &ErrorStatus);
+				dc = bled_get_uncompressed_size(path, file_assoc[i].type);
+				if (dc > 0)
+					img_report.projected_size = dc;
 				dc = bled_uncompress_to_buffer(path, (char*)buf, MBR_SIZE, file_assoc[i].type);
 				bled_exit();
 			} else if (img_report.compression_type == BLED_COMPRESSION_MAX) {
@@ -499,7 +502,6 @@ static DWORD WINAPI VhdSaveImageThread(void* param)
 	// be used as DD images.
 	if (img_save->Type == VIRTUAL_STORAGE_TYPE_DEVICE_VHD)
 		flags |= CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION;
-	// TODO: Use CREATE_VIRTUAL_DISK_FLAG_PREVENT_WRITES_TO_SOURCE_DISK?
 
 	overlapped.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
 

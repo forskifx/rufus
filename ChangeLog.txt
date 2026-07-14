@@ -1,3 +1,31 @@
+o Version 4.15 (2026.06.30)
+    Add RISC-V 64 support to UEFI:NTFS
+    Improve the guards for using the "silent" Windows installation option
+    Improve the ability to cancel during write retries
+    Improve progress reporting for compressed image extraction
+    Fix unrestricted XML entity expansion and integer overflow in ezxml parser (courtesy of Eric Sadowski)
+    Fix "silent" Windows installation failing at 75% in most cases
+    Fix a crash during boot when using UEFI:NTFS on Snapdragon X based ARM64 platforms
+    Fix first WUE option always being checked by default
+    Fix an infinite loop when using Windows ISOs that contain multiple WIMs
+    Fix "Enable runtime UEFI media validation" checkbox not always being properly enabled
+    Other WUE improvements/fixes for OneDrive removal and username validation (with thanks to @christian8641)
+
+o Version 4.14 (2026.04.30)
+    Windows User Experience improvements:
+      - Add a "Quality of Life" option, to disable Teams, Outlook, Copilot and other Microsoft forced nuisances
+      - Add a Silent installation option, that automatically, and WITHOUT PROMPT, installs Windows on the first detected disk
+      - Add an option to copy 'SkuSiPolicy.p7b' to the ESP on installation (please refer to KB5042562 for more info)
+      - Add tooltips for all the dialog options
+    Add limited support for El-Torito UEFI image extraction (Mostly for Dell BIOS update ISOs)
+    Improve error report when the user tries to use an image that resides on the target drive
+    Improve the UEFI:NTFS partition label to make the install media more explicit during Windows Setup disk partitioning
+    Improve support for Bazzite and other Fedora derivatives that don't follow EFI conventions
+    Improve detection and exclusion of the new Bitdefender hidden VHDs
+    Improve reporting of GRUB and Isolinux MBRs
+    Fix potential errors during creation of Windows To Go media, due to the use of new versions of bcdboot
+    Fix errors with local accounts that start or end with whitespaces
+
 o Version 4.13 (2026.02.17) [BUGFIX RELEASE]
     Fix UEFI:NTFS not selecting the proper driver for ARM/ARM64
     Update embedded GRUB to v2.14

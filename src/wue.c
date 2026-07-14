@@ -50,7 +50,7 @@ int unattend_edition_index = 1;
 char *unattend_xml_path = NULL, unattend_username[MAX_USERNAME_LENGTH];
 uint32_t removable_section[2] = { 0, 0 };
 
-extern BOOL validate_md5sum;
+extern BOOL validate_md5sum, bcdboot_supports_ex;
 extern uint64_t md5sum_totalbytes;
 extern StrArray modified_files;
 extern const char* efi_archname[ARCH_MAX];
@@ -108,7 +108,11 @@ out:
 char* CreateUnattendXml(int arch, int flags)
 {
 	const static char* xml_arch_names[5] = { "x86", "amd64", "arm", "arm64" };
-	const static char* unallowed_account_names[] = { "Administrator", "Guest", "KRBTGT", "Local", "NONE" };
+	const static char* unallowed_account_names[] = {
+		// From https://learn.microsoft.com/en-us/archive/technet-wiki/13813.localized-names-for-administrator-account-in-windows
+		"Administrator", "Järjestelmänvalvoja", "Administrateur", "Rendszergazda", "Administrador", "Администратор", "Administratör",
+		"Guest", "DefaultAccount", "WDAGUtilityAccount", "HelpAssistant", "KRBTGT", "Local", "NONE", "SYSTEM"
+	};
 	static char path[MAX_PATH], tmp[MAX_PATH];
 	char* tzstr;
 	FILE* fd;
@@ -153,18 +157,24 @@ char* CreateUnattendXml(int arch, int flags)
 			if (flags & UNATTEND_DISABLE_BITLOCKER)
 				fprintf(fd, "        <DisableEncryptedDiskProvisioning>true</DisableEncryptedDiskProvisioning>\n");
 			// The following ensures that we display the disk selection screen if only the boot media is
-			// available (i.e. if the system does not see any target for installation). In that case the
-			// letter assignment below fails and the UI is displayed allowing the user to provide drivers.
-			// This also prevents the install media from being scratched, when it's the only disk.
+			// available (i.e. if the system does not see any target for installation) or (in most cases)
+			// if the user happens to have more than one disk connected besides the instal USB. In that
+			// case the label assignment below fails and the UI is displayed allowing the user to provide
+			// drivers or pick their target disk explicitly.
+			// This also prevents the install media from being scratched.
 			// With a special mention to Claude AI, that explicitly said this could not be accomplished...
+			// Note that this may result in the disk partition screen being produced on systems that have
+			// card readers, but we'd rather inconvenience a few people, to prevent potential data loss,
+			// than the opposite. Also note that you do *NOT* want to try to use drive letter mapping for
+			// the detection here, as if your drive isn't of type FIXED, the file copy steps bails out at
+			// 75%. See https://github.com/pbatard/rufus/issues/2960 for more details.
 			fprintf(fd, "        <Disk wcm:action=\"modify\">\n");
 			fprintf(fd, "          <DiskID>1</DiskID> \n");
 			fprintf(fd, "          <ModifyPartitions>\n");
 			fprintf(fd, "            <ModifyPartition wcm:action=\"modify\">\n");
 			fprintf(fd, "              <Order>1</Order>\n");
-			fprintf(fd, "              <PartitionID>1</PartitionID>\n");
-			// You REALLY don't want to use 'U' for the drive letter below. Don't ask me how I know!!!
-			fprintf(fd, "              <Letter>D</Letter>\n");
+			fprintf(fd, "              <PartitionID>2</PartitionID>\n");
+			fprintf(fd, "              <Label>RUFUS_BOOT</Label>\n");
 			fprintf(fd, "            </ModifyPartition>\n");
 			fprintf(fd, "          </ModifyPartitions>\n");
 			fprintf(fd, "        </Disk>\n");
@@ -269,14 +279,20 @@ char* CreateUnattendXml(int arch, int flags)
 			// Remove OneDrive
 			StrArrayAdd(&commands, "reg add \"HKLM\\Software\\Policies\\Microsoft\\Windows\\OneDrive\" /v DisableFileSyncNGSC /t REG_DWORD /d 1 /f", TRUE);
 			StrArrayAdd(&commands, "PowerShell -NonInteractive -WindowStyle Hidden -Command "
-				"\"Remove-Item -Path $env:SystemRoot\\System32\\OneDriveSetup.exe -Force -Confirm:$false;"
-				"\"Remove-Item -Path $env:SystemRoot\\SysWOW64\\OneDriveSetup.exe -Force -Confirm:$false;", TRUE);
+				"\"Remove-Item -Path $env:SystemRoot\\System32\\OneDriveSetup.exe -Force -Confirm:$false; "
+				"Remove-Item -Path $env:SystemRoot\\SysWOW64\\OneDriveSetup.exe -Force -Confirm:$false;\"", TRUE);
 			// Remove Outlook. How the frig is forcing Outlook on users legal when MS got pinned for bundling IE with Windows?
 			StrArrayAdd(&commands, "PowerShell -NonInteractive -WindowStyle Hidden -Command "
-				"\"Get-AppxProvisionedPackage -Online | Where-Object {$_.PackageName -like '*OutlookForWindows*'} |"
+				"\"Get-AppxProvisionedPackage -Online | Where-Object {$_.PackageName -like '*Outlook*'} |"
 				" Remove-AppxProvisionedPackage -Online\"", TRUE);
 			StrArrayAdd(&commands, "PowerShell -NonInteractive -WindowStyle Hidden -Command "
-				"\"Get-AppxPackage -AllUsers *OutlookForWindows* | Remove-AppxPackage -AllUsers\"", TRUE);
+				"\"Get-AppxPackage -AllUsers *Outlook* | Remove-AppxPackage -AllUsers\"", TRUE);
+			// Same for Teams. Also: "HEY, MICROSOFT, SCREW YOU!!!!"
+			StrArrayAdd(&commands, "PowerShell -NonInteractive -WindowStyle Hidden -Command "
+				"\"Get-AppxProvisionedPackage -Online | Where-Object {$_.PackageName -like '*Teams*'} |"
+				" Remove-AppxProvisionedPackage -Online\"", TRUE);
+			StrArrayAdd(&commands, "PowerShell -NonInteractive -WindowStyle Hidden -Command "
+				"\"Get-AppxPackage -AllUsers *Teams* | Remove-AppxPackage -AllUsers\"", TRUE);
 		}
 		// Now that we have all the commands to run, create the RunSynchronous section.
 		for (order = 1; order <= (int)commands.Index; order++) {
@@ -300,14 +316,20 @@ char* CreateUnattendXml(int arch, int flags)
 			fprintf(fd, "    <component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"%s\" language=\"neutral\" "
 				"xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
 				"publicKeyToken=\"31bf3856ad364e35\" versionScope=\"nonSxS\">\n", xml_arch_names[arch]);
-			// https://docs.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-oobe-protectyourpc
-			// It is really super disingenuous of Microsoft to call this option "ProtectYourPC", when it's really only about
-			// data collection. But of course, if it was called "AllowDataCollection", everyone would turn it off...
-			if (flags & UNATTEND_NO_DATA_COLLECTION) {
+			// We should always have UNATTEND_NO_DATA_COLLECTION if UNATTEND_SILENT_INSTALL is set but whatever...
+			if (flags & (UNATTEND_NO_DATA_COLLECTION | UNATTEND_SILENT_INSTALL)) {
 				uprintf("• Disable data collection");
 				fprintf(fd, "      <OOBE>\n");
 				fprintf(fd, "        <HideEULAPage>true</HideEULAPage>\n");
+				// https://docs.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-oobe-protectyourpc
+				// It is really super disingenuous of Microsoft to call this option "ProtectYourPC", when it's really only about
+				// data collection. But of course, if it was called "AllowDataCollection", everyone would turn it off...
 				fprintf(fd, "        <ProtectYourPC>3</ProtectYourPC>\n");
+				// Without these, the "Let's connect you to a network" can appear in silent installs when Ethernet is disconnected.
+				if (flags & UNATTEND_SILENT_INSTALL) {
+					fprintf(fd, "        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>\n");
+					fprintf(fd, "        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>\n");
+				}
 				fprintf(fd, "      </OOBE>\n");
 			}
 			if (flags & UNATTEND_DUPLICATE_LOCALE) {
@@ -325,9 +347,7 @@ char* CreateUnattendXml(int arch, int flags)
 					uprintf("WARNING: '%s' is not allowed as local account name - Option ignored", unattend_username);
 				} else if (unattend_username[0] != 0) {
 					char* org_username = safe_strdup(unattend_username);
-					// Per https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-shell-setup-useraccounts-localaccounts-localaccount-name
-					// Add '.' to the list because some folks also reported an issue with local accounts that have dots...
-					filter_chars(unattend_username, "/\\[]:|<>+=;,?*%@.", '_');
+					filter_chars(unattend_username, USERNAME_INVALID_CHARS, '_');
 					uprintf("• Use '%s' for local account name", unattend_username);
 					if (strcmp(org_username, unattend_username) != 0)
 						uprintf("WARNING: Local account name contained unallowed characters and has been sanitized");
@@ -371,7 +391,6 @@ char* CreateUnattendXml(int arch, int flags)
 			// through a full Windows Update cycle.
 			if (flags & UNATTEND_APPLY_SKUSIPOLICY) {
 				uprintf("• Apply SkuSiPolicy.p7b");
-				// TODO: Could we hide this using PowerShell?
 				StrArrayAdd(&commands, "cmd /c mountvol S: /S &amp;&amp; "
 					"copy %WINDIR%\\system32\\SecureBootUpdates\\SkuSiPolicy.p7b S:\\EFI\\Microsoft\\Boot &amp;&amp; "
 					"mountvol S: /D", TRUE);
@@ -393,6 +412,11 @@ char* CreateUnattendXml(int arch, int flags)
 				// Disable Windows Phone and similarly pushed unwanted crap
 				StrArrayAdd(&commands, "reg add \"HKLM\\Software\\Policies\\Microsoft\\Windows\\CloudContent\" "
 					"/v DisableWindowsConsumerFeatures /t REG_DWORD /d 1 /f", TRUE);
+				// Disable ads in menu
+				StrArrayAdd(&commands, "reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\" "
+					"/v SystemPaneSuggestionsEnabled /t REG_DWORD /d 0 /f", TRUE);
+				StrArrayAdd(&commands, "reg add \"HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Search\" "
+					"/v BingSearchEnabled /t REG_DWORD /d 0 /f", TRUE);
 				// Disable News
 				StrArrayAdd(&commands, "reg add \"HKLM\\Software\\Policies\\Microsoft\\Dsh\" "
 					"/v AllowNewsAndInterests /t REG_DWORD /d 0 /f", TRUE);
@@ -957,7 +981,8 @@ out:
 /// <returns>TRUE on success, FALSE on error.</returns>
 BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp)
 {
-	char *ms_efi = NULL, wim_path[4 * MAX_PATH], cmd[MAX_PATH];
+	char *ms_efi = NULL, wim_path[4 * MAX_PATH], cmd[MAX_PATH], path[MAX_PATH];
+	BOOL use_bootex = FALSE;
 	ULONG cluster_size;
 
 	uprintf("Windows To Go mode selected");
@@ -1015,11 +1040,24 @@ BOOL SetupWinToGo(DWORD DriveIndex, const char* drive_name, BOOL use_esp)
 
 	// We invoke the 'bcdboot' command from the host, as the one from the drive produces problems (#558)
 	// and of course, we couldn't invoke an ARM64 'bcdboot' binary on an x86 host anyway...
-	// Also, since Rufus should (usually) be running as a 32 bit app, on 64 bit systems, we need to use
+	// Also, since Rufus may be running as a 32 bit app, on 64 bit systems, we need to use
 	// 'C:\Windows\Sysnative' and not 'C:\Windows\System32' to invoke bcdboot, as 'C:\Windows\System32'
 	// will get converted to 'C:\Windows\SysWOW64' behind the scenes, and there is no bcdboot.exe there.
+	// Finally, due to the whole _EX mess, we have to detect if the system bcdboot supports the /offline
+	// option, and if it does, whether the target has `Windows\Boot\EFI_EX\` so that we don't let bcdboot
+	// attempt to use the _EX files and fail. See https://github.com/pbatard/rufus/issues/2940.
 	uprintf("Enabling boot using command:");
-	static_sprintf(cmd, "%s\\bcdboot.exe %s\\Windows /v /f %s /s %s", sysnative_dir, drive_name,
+	// Create the EFI\Microsoft\Boot\ directory on the ESP, since bcdboot is apparently unable to do that!
+	static_sprintf(path, "%s\\EFI\\Microsoft\\Boot", (use_esp) ? ms_efi : drive_name);
+	_mkdirExU(path);
+	// The default of recent bcdboot is to try to use the EX files (even if they don't exist) unless
+	// /offline is specified *without* /bootex, which of course results in an error if, say, we try
+	// to create a Windows 10 Windows To Go drive on an up to date Windows platform.
+	// So we need to specify /offline and /bootex very carefully.
+	static_sprintf(path, "%s\\Windows\\Boot\\EFI_EX", drive_name);
+	use_bootex = (bcdboot_supports_ex && (unattend_xml_flags & UNATTEND_USE_MS2023_BOOTLOADERS) && PathFileExistsU(path));
+	static_sprintf(cmd, "%s\\bcdboot.exe %s\\Windows /v %s%s/f %s /s %s", sysnative_dir, drive_name,
+		bcdboot_supports_ex ? "/offline " : "", use_bootex ? "/bootex " : "",
 		HAS_BOOTMGR_BIOS(img_report) ? (HAS_BOOTMGR_EFI(img_report) ? "ALL" : "BIOS") : "UEFI",
 		(use_esp) ? ms_efi : drive_name);
 	// I don't believe we can ever have a stray '%' in cmd, but just in case...
@@ -1304,7 +1342,7 @@ BOOL ApplyWindowsCustomization(char drive_letter, int flags)
 		UpdateProgressWithInfoForce(OP_PATCH, MSG_325, 103, PATCH_PROGRESS_TOTAL);
 	}
 
-	if (flags & UNATTEND_USE_MS2023_BOOTLOADERS) {
+	if ((flags & UNATTEND_USE_MS2023_BOOTLOADERS) && !(flags & UNATTEND_WINDOWS_TO_GO)) {
 		if_assert_fails(update_boot_wim)
 			goto out;
 		if (GetTempDirNameU(temp_dir, APPLICATION_NAME, 0, tmp_path[1]) == 0) {

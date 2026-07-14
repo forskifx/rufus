@@ -74,7 +74,7 @@ extern const int nb_steps[FS_MAX];
 extern const char* md5sum_name[2];
 extern uint32_t dur_mins, dur_secs;
 extern BOOL force_large_fat32, enable_ntfs_compression, lock_drive, zero_drive, fast_zeroing, enable_file_indexing;
-extern BOOL write_as_image, use_vds, write_as_esp, is_vds_available, has_ffu_support, use_rufus_mbr;
+extern BOOL write_as_image, use_vds, write_as_esp, is_vds_available, has_ffu_support, use_rufus_mbr, append_silent;
 extern char* archive_path;
 uint8_t *grub2_buf = NULL, *sec_buf = NULL;
 long grub2_len;
@@ -1072,10 +1072,18 @@ BOOL WritePBR(HANDLE hLogicalVolume)
 	return FALSE;
 }
 
-static void update_progress(const uint64_t processed_bytes)
+static void update_progress(const int64_t processed_bytes)
 {
-	UpdateProgressWithInfo(OP_FORMAT, MSG_261, processed_bytes, img_report.image_size);
-	uprint_progress(processed_bytes, img_report.image_size);
+	static uint64_t total_bytes;
+
+	if (processed_bytes < 0) {
+		total_bytes = -processed_bytes;
+		UpdateProgressWithInfo(OP_FORMAT, MSG_261, 0, total_bytes);
+		uprint_progress(0, total_bytes);
+	} else {
+		UpdateProgressWithInfo(OP_FORMAT, MSG_261, processed_bytes, total_bytes);
+		uprint_progress(processed_bytes, total_bytes);
+	}
 }
 
 // Some compressed images use streams that aren't multiple of the sector
@@ -1288,7 +1296,6 @@ static BOOL WriteDrive(HANDLE hPhysicalDrive, BOOL bZeroDrive)
 		if_assert_fails((uintptr_t)sec_buf% SelectedDrive.SectorSize == 0)
 			goto out;
 		sec_buf_pos = 0;
-		update_progress(0);
 		bled_init(256 * KB, uprintf, NULL, sector_write, update_progress, NULL, &ErrorStatus);
 		bled_ret = bled_uncompress_with_handles(hSourceImage, hPhysicalDrive, img_report.compression_type);
 		bled_exit();
@@ -1781,6 +1788,9 @@ try_clear:
 	}
 
 	GetWindowTextU(hLabel, label, sizeof(label));
+	// Append a " (SILENT)" suffix to the label for fully unattended silent installation media.
+	if (append_silent && strstr(label, " (SILENT)") == NULL)
+		static_strcat(label, " (SILENT)");
 	if (fs_type < FS_EXT2)
 		ToValidLabel(label, (fs_type == FS_FAT16) || (fs_type == FS_FAT32) || (fs_type == FS_EXFAT));
 	ClusterSize = (DWORD)ComboBox_GetCurItemData(hClusterSize);
